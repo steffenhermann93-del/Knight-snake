@@ -1,0 +1,160 @@
+<!doctype html>
+
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#333333" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Knight Train — Snake mit Rittern</title>
+  <link rel="apple-touch-icon" href="#icon192" />
+  <style>
+    body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; background: #f8f4ec; margin: 0; }
+    .wrap { text-align: center; max-width: 600px; }
+    .badges { display: flex; justify-content: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    .badge { padding: 4px 8px; border-radius: 12px; background: #fff; border: 1px solid #ccc; font-size: 14px; }
+    .controls { margin-bottom: 8px; display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; }
+    button { padding: 6px 12px; border-radius: 8px; border: none; background: #333; color: white; cursor: pointer; }
+    button:disabled { background: #888; }
+    .board { display: grid; grid-template-columns: repeat(20, 1fr); grid-template-rows: repeat(20, 1fr); gap: 1px; background: #ccc; margin: 0 auto; width: 90vmin; height: 90vmin; max-width: 540px; max-height: 540px; }
+    .cell { background: #fff; display: flex; align-items: center; justify-content: center; font-size: calc(90vmin / 20 * 0.8); }
+    footer { font-size: 12px; margin-top: 8px; opacity: 0.7; }
+  </style>
+  <script>
+    // --- Minimal PWA bootstrap (works when served over HTTPS or localhost) ---
+    (function(){
+      if (location.protocol === 'http:' && location.hostname !== 'localhost') return; // require https/localhost
+      // generate icons on the fly
+      function makeIcon(size){
+        const c=document.createElement('canvas'); c.width=c.height=size; const g=c.getContext('2d');
+        g.fillStyle='#333'; g.fillRect(0,0,size,size);
+        g.font=Math.floor(size*0.6)+'px serif'; g.textAlign='center'; g.textBaseline='middle'; g.fillStyle='#fff'; g.fillText('♘', size/2, size/2+size*0.06);
+        return c.toDataURL('image/png');
+      }
+      const icon192 = makeIcon(192); const icon512 = makeIcon(512);
+      // create a manifest blob
+      const manifest = {
+        name: 'Knight Train', short_name: 'Knights', start_url: '.', scope: '.',
+        display: 'standalone', background_color: '#f8f4ec', theme_color: '#333333',
+        icons: [ {src: icon192, sizes:'192x192', type:'image/png'}, {src: icon512, sizes:'512x512', type:'image/png'} ]
+      };
+      const mblob = new Blob([JSON.stringify(manifest)], {type:'application/manifest+json'});
+      const murl = URL.createObjectURL(mblob);
+      const link = document.createElement('link'); link.rel='manifest'; link.href=murl; document.head.appendChild(link);
+      // also set apple-touch-icon dynamically
+      const at = document.querySelector('link[rel="apple-touch-icon"]'); if (at) at.href = icon192;
+      // service worker (cache shell)
+      if ('serviceWorker' in navigator){
+        const swCode = `self.addEventListener('install', e=>{ e.waitUntil(caches.open('knight-v1').then(c=>c.addAll(['./']))); });
+                          self.addEventListener('fetch', e=>{ e.respondWith(caches.match(e.request).then(r=> r || fetch(e.request))); });`;
+        const blob = new Blob([swCode], {type:'text/javascript'});
+        const url = URL.createObjectURL(blob);
+        navigator.serviceWorker.register(url, {scope: './'}).catch(()=>{});
+      }
+    })();
+  </script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Knight Train</h1>
+    <div class="badges">
+      <div class="badge" id="score">Score: 0</div>
+      <div class="badge" id="best">Best: 0</div>
+      <div class="badge" id="spd">Tempo: 0/s</div>
+    </div>
+    <div class="controls">
+      <button id="btnStart">Start</button>
+      <button id="btnRestart" disabled>Neustart (R)</button>
+    </div>
+    <div class="board" id="grid"></div>
+    <footer>🏰 = Burg, 🪨 = Hindernis, 👹 = Gegner, ⚡🛡️💖 = Power-ups</footer>
+  </div>
+<script>
+(function(){
+  const GRID = 20;
+  const START_SPEED = 220;
+  const MIN_SPEED = 80;
+  const SPEED_STEP = 8;
+  const POWERUP_TYPES = ['⚡','🛡️','💖'];const gridEl = document.getElementById('grid'); const scoreEl = document.getElementById('score'); const bestEl = document.getElementById('best'); const spdEl = document.getElementById('spd'); const btnStart = document.getElementById('btnStart'); const btnRestart = document.getElementById('btnRestart');
+
+const cells = []; for (let y=0; y<GRID; y++) { for (let x=0; x<GRID; x++) { const c = document.createElement('div'); c.className = 'cell'; gridEl.appendChild(c); cells.push(c); } }
+
+const kpos = p=>${p.x},${p.y}; const eq = (a,b)=>a.x===b.x && a.y===b.y; const rnd = n=>Math.floor(Math.random()*n);
+
+let knights, dir, nextDir, castle, running, over, speed, score, best, loop; let obstacles, enemies, powerups;
+
+function reset(){ const start={x:10,y:10}; knights=[start]; dir={x:1,y:0}; nextDir={x:1,y:0}; obstacles=spawnMany(5); enemies=spawnMany(3); powerups=[]; castle=placeFree(new Set([kpos(start), ...obstacles.map(kpos), ...enemies.map(kpos)])); running=false;over=false;speed=START_SPEED;score=0; best=Number(localStorage.getItem('knightSnakeBest')||0); updateBadges(); render(); clearInterval(loop); }
+
+function spawnMany(count){ const arr=[];const occ=new Set(knights.map(kpos)); if(castle) occ.add(kpos(castle)); for(let i=0;i<count;i++){ const pos=placeFree(occ); arr.push(pos); occ.add(kpos(pos)); } return arr; }
+
+function placeFree(occupied){ let x,y;do{x=rnd(GRID);y=rnd(GRID);}while(occupied.has(${x},${y})); return {x,y}; }
+
+function start(){ if(over) return; running=true; tickLoop(); } function restart(){ reset(); start(); }
+
+function tickLoop(){ clearInterval(loop); loop=setInterval(tick,speed); }
+
+function tick(){ dir=nextDir; const head={x:knights[0].x+dir.x,y:knights[0].y+dir.y}; if(head.x<0||head.x>=GRID||head.y<0||head.y>=GRID) return end(); if(knights.some(k=>eq(k,head))) return end(); if(obstacles.some(o=>eq(o,head))) return end();
+
+for(let i=0;i<enemies.length;i++){
+  if(eq(enemies[i],head)){
+    enemies.splice(i,1);
+    score+=2;
+    knights.unshift(head);
+    render();updateBadges();return;
+  }
+}
+
+enemies=enemies.map(e=>{
+  const dirs=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  const np={x:e.x+dirs[rnd(4)].x,y:e.y+dirs[rnd(4)].y};
+  if(np.x>=0&&np.x<GRID&&np.y>=0&&np.y<GRID&&!obstacles.some(o=>eq(o,np))) return np; else return e;
+});
+
+for(const e of enemies){
+  for(let i=0;i<knights.length;i++){
+    if(eq(e,knights[i])){
+      knights.splice(i,1);
+      enemies=enemies.filter(en=>!eq(en,e));
+      if(knights.length===0) return end();
+    }
+  }
+}
+
+let grew=false;
+if(eq(head,castle)){
+  grew=true;score++;
+  speed=Math.max(MIN_SPEED,speed-SPEED_STEP);
+  castle=placeFree(new Set([...knights.map(kpos),...obstacles.map(kpos),...enemies.map(kpos)]));
+  if(Math.random()<0.3) powerups.push({...placeFree(new Set()), type:POWERUP_TYPES[rnd(POWERUP_TYPES.length)]});
+}
+
+for(let i=0;i<powerups.length;i++){
+  if(eq(head,powerups[i])){
+    const t=powerups[i].type;
+    if(t==='⚡') speed=Math.max(MIN_SPEED,speed-20);
+    if(t==='🛡️') obstacles=[];
+    if(t==='💖') knights.push({...knights[knights.length-1]});
+    powerups.splice(i,1);
+    tickLoop();
+  }
+}
+
+knights.unshift(head);
+if(!grew) knights.pop();
+render();updateBadges();
+
+}
+
+function end(){ over=true; running=false; clearInterval(loop); best=Math.max(best,score); localStorage.setItem('knightSnakeBest',best); }
+
+function updateBadges(){ scoreEl.textContent=Score: ${score}; bestEl.textContent=Best: ${best}; spdEl.textContent=Tempo: ${Math.round(1000/speed)} /s; }
+
+function render(){ for(const c of cells) c.textContent=''; if(castle) cells[castle.yGRID+castle.x].textContent='🏰'; knights.forEach((p,i)=>cells[p.yGRID+p.x].textContent=i===0?'🛡️':'⚔️'); obstacles.forEach(o=>cells[o.yGRID+o.x].textContent='🪨'); enemies.forEach(e=>cells[e.yGRID+e.x].textContent='👹'); powerups.forEach(p=>cells[p.y*GRID+p.x].textContent=p.type); }
+
+const dirs={ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},a:{x:-1,y:0},s:{x:0,y:1},d:{x:1,y:0}}; window.addEventListener('keydown',e=>{ if(e.key==='r'||e.key==='R') return restart(); const nd=dirs[e.key]; if(nd && !(knights.length>1 && nd.x===-dir.x && nd.y===-dir.y)) nextDir=nd; if(!running&&!over) start(); });
+
+btnStart.addEventListener('click',start); btnRestart.addEventListener('click',restart); reset(); })(); </script>
+
+</body>
+</html>
